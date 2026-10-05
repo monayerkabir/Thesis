@@ -1,0 +1,1149 @@
+setwd("D:/Monayer")
+library(haven)
+ch2012 <- read_sav("D:/Monayer/ch2012.sav")
+ch2019 <- read_sav("D:/Monayer/ch2019.sav")
+ch2025 <- read_sav("D:/Monayer/ch2025.sav")
+colnames(ch2012)
+colnames(ch2019)
+colnames(ch2025)
+#str(ch2012)
+library(dplyr)
+ch2012 <- ch2012 %>%
+  rename(UB1D = AG1D, UB1M = AG1M, UB1Y = AG1Y,
+         UB2 = AG2 )
+common_cols <- Reduce(intersect, list(names(ch2012), names(ch2019), names(ch2025)))
+length(common_cols)
+common_cols
+setdiff(names(ch2012), common_cols)  # in 2012 only (relative to others)
+setdiff(names(ch2019), common_cols)
+setdiff(names(ch2025), common_cols)
+# quick case-insensitive check for near-misses
+tolower_common <- Reduce(intersect, list(tolower(names(ch2012)), tolower(names(ch2019)), tolower(names(ch2025))))
+setdiff(tolower_common, tolower(common_cols))  # variables only missed due to case
+#ch12 <- ch2012 |> select(common_cols)
+ch2012_sub <- ch2012 %>% select(all_of(common_cols)) %>% mutate(survey_year = 2012)
+ch2019_sub <- ch2019 %>% select(all_of(common_cols)) %>% mutate(survey_year = 2019)
+ch2025_sub <- ch2025 %>% select(all_of(common_cols)) %>% mutate(survey_year = 2025)
+
+ch_merged <- bind_rows(ch2012_sub, ch2019_sub, ch2025_sub)
+View(ch_merged)
+
+#var_labels <- sapply(ch2012, attr, "label")
+#
+#ch12_labels <- data.frame(variable = names(var_labels),
+#                          label = unname(var_labels))
+#library(openxlsx2)
+#write_xlsx(ch12_labels,file = "ch12_labels.xlsx")
+#
+#var_labels <- sapply(ch2019, attr, "label")
+#ch19_labels <- data.frame(variable = names(var_labels),
+#                          label = unname(var_labels))
+#write_xlsx(ch19_labels,file = "ch19_labels.xlsx")
+#
+#var_labels <- sapply(ch2025, attr, "label")
+#ch25_labels <- data.frame(variable = names(var_labels),
+#                          label = unname(var_labels))
+#write_xlsx(ch25_labels,file = "ch25_labels.xlsx")
+
+
+# ============================================================
+# Map birth-year agricultural production & climate data onto
+# the merged MICS child dataset (ch_merged)
+# ============================================================
+# Assumes ch_merged already exists in your session (from your
+# 2012/2019/2025 merge), and Agri_production.xlsx is the workbook
+# with sheets: "Total Rice, All types ", "Wheat ", "Maize ", "Potato"
+#
+# NOTE: Production data here is NATIONAL-YEAR only (no district
+# breakdown available). So agri_national and every crop/production
+# column below is the same for every district in a given birth
+# year -- it varies by birth_year only, not by HH7A (district).
+# District-wise temperature/rainfall will come from the separate
+# 64 district files later and *will* vary by HH7A + birth_year.
+# ============================================================
+
+library(readxl)
+library(dplyr)
+library(janitor)   # clean_names() for climate columns
+
+agri_path <- "D:/Monayer/Agri_production.xlsx"   # <-- update path
+
+# ------------------------------------------------------------
+# 1. Crop-specific columns (differ by sheet)
+# ------------------------------------------------------------
+crop_map <- c(
+  "Total Rice, All types " = "rice",
+  "Wheat "                 = "wheat",
+  "Maize "                 = "maize",
+  "Potato"                 = "potato"
+)
+
+crop_specific_cols <- c(
+  "Area (Acres)", "Production (Tons)",
+  "Calculated Yield (KG)", "Raw Yield (KG)",
+  "Price (Per Quintal in BDT)"
+)
+
+crop_list <- lapply(names(crop_map), function(sn) {
+  prefix <- crop_map[[sn]]
+  read_excel(agri_path, sheet = sn) %>%
+    select(Year, all_of(crop_specific_cols)) %>%
+    rename(
+      !!paste0(prefix, "_area_acres")        := `Area (Acres)`,
+      !!paste0(prefix, "_production_tons")   := `Production (Tons)`,
+      !!paste0(prefix, "_yield_calc_kg")     := `Calculated Yield (KG)`,
+      !!paste0(prefix, "_yield_raw_kg")      := `Raw Yield (KG)`,
+      !!paste0(prefix, "_price_bdt_quintal") := `Price (Per Quintal in BDT)`
+    )
+})
+
+agri_crops <- Reduce(function(x, y) full_join(x, y, by = "Year"), crop_list)
+
+# ------------------------------------------------------------
+# 2. Shared national climate/economic columns
+#    (identical across all 4 sheets -> pull from one sheet only,
+#    e.g. Rice, to avoid duplicating 60 columns x 4)
+# ------------------------------------------------------------
+agri_climate <- read_excel(agri_path, sheet = names(crop_map)[1]) %>%
+  select(-all_of(crop_specific_cols)) %>%
+  clean_names()   # e.g. "(Dry-Bulb)Annual Average Temperature (°C)" -> dry_bulb_annual_average_temperature_c
+
+names(agri_climate)[names(agri_climate) == "year"] <- "Year"
+
+# ------------------------------------------------------------
+# 3. Combine into one national year-level agri/climate table
+# ------------------------------------------------------------
+agri_national <- agri_crops %>%
+  left_join(agri_climate, by = "Year") %>%
+  rename(birth_year = Year) %>%
+  arrange(birth_year)
+
+# reference period mean/SD for anomalies (full available series;
+# swap to a rolling 20-yr window later if you want it time-varying)
+prod_cols <- grep("_production_tons$", names(agri_national), value = TRUE)
+
+for (col in prod_cols) {
+  crop <- sub("_production_tons$", "", col)
+  m <- mean(agri_national[[col]], na.rm = TRUE)
+  agri_national[[paste0(crop, "_production_anomaly")]] <-
+    (agri_national[[col]] - m) / m
+}
+
+# ------------------------------------------------------------
+# 4. Construct birth_year in ch_merged from UB1D/UB1M/UB1Y
+# ------------------------------------------------------------
+# MICS commonly codes missing as 99 (day), 99 (month), 9999 (year).
+# Adjust these missing-value codes if your codebook differs.
+ch_merged <- ch_merged %>%
+  mutate(
+    UB1D_clean = na_if(UB1D, 99),
+    UB1M_clean = na_if(UB1M, 99),
+    UB1Y_clean = na_if(UB1Y, 9999),
+    birth_year = as.numeric(UB1Y_clean)
+  )
+
+# sanity checks before merging
+cat("Birth year range in ch_merged:\n")
+print(range(ch_merged$birth_year, na.rm = TRUE))
+
+cat("\nAgri data year range:\n")
+print(range(agri_national$birth_year, na.rm = TRUE))
+
+cat("\nChildren whose birth_year falls OUTSIDE the agri data range",
+    "(will get NA production/climate values):\n")
+ch_merged %>%
+  filter(!is.na(birth_year), !birth_year %in% agri_national$birth_year) %>%
+  count(birth_year) %>%
+  print(n = Inf)
+
+cat("\nNumber of distinct districts (HH7A) in ch_merged:",
+    n_distinct(ch_merged$HH7A), "\n")
+cat("(Reminder: production/climate values from this file are national,",
+    "i.e. identical across HH7A within a birth_year -- district variation",
+    "will only enter once you bring in the 64 district temp/rainfall files.)\n")
+
+# ------------------------------------------------------------
+# 5. Merge
+# ------------------------------------------------------------
+ch_merged_agri <- ch_merged %>%
+  left_join(agri_national, by = "birth_year")
+
+# quick check
+cat("\nRows in ch_merged:", nrow(ch_merged), "\n")
+cat("Rows in ch_merged_agri:", nrow(ch_merged_agri), "\n")  # should match
+cat("Share with matched production data:",
+    mean(!is.na(ch_merged_agri$rice_production_tons)), "\n")
+
+# saveRDS(ch_merged_agri, "D:/Monayer/ch_merged_agri.rds")
+View(ch_merged_agri)
+
+# ============================================================
+# Add 1-year and 2-year LAGGED production/climate variables
+# Lag = value from (birth_year - lag), i.e. years prior to birth
+# Run AFTER map_production_to_mics.R (needs agri_national, ch_merged)
+# ============================================================
+
+library(dplyr)
+
+# ------------------------------------------------------------
+# Generic helper: shift agri_national's year forward by `lag`,
+# suffix every non-key column with _lagN, then it can be joined
+# on the CHILD's birth_year directly.
+#
+# Why shift forward: a row originally at year (Y - lag) becomes
+# labelled (Y - lag) + lag = Y after the mutate, so joining on
+# birth_year = Y correctly pulls in the (Y - lag) data.
+# ------------------------------------------------------------
+make_lagged_agri <- function(agri, lag, key = "birth_year") {
+  agri %>%
+    mutate(!!key := .data[[key]] + lag) %>%
+    rename_with(~ paste0(.x, "_lag", lag), .cols = -all_of(key))
+}
+
+agri_lag1 <- make_lagged_agri(agri_national, lag = 1)
+agri_lag2 <- make_lagged_agri(agri_national, lag = 2)
+
+# ------------------------------------------------------------
+# Join lag0 (contemporaneous, birth year), lag1, lag2 onto ch_merged
+# ------------------------------------------------------------
+ch_merged_agri <- ch_merged %>%
+  left_join(agri_national, by = "birth_year") %>%   # lag0 (birth year itself)
+  left_join(agri_lag1,      by = "birth_year") %>%  # lag1 (birth year - 1)
+  left_join(agri_lag2,      by = "birth_year")       # lag2 (birth year - 2)
+
+# ------------------------------------------------------------
+# Diagnostics: match rate for each lag (lag1/lag2 will have more
+# NAs at the early edge of your agri series, e.g. children born
+# in 1980 or 1981 can't get a full lag2 since data starts 1980)
+# ------------------------------------------------------------
+cat("Match rate, lag0 (rice production):",
+    mean(!is.na(ch_merged_agri$rice_production_tons)), "\n")
+cat("Match rate, lag1 (rice production):",
+    mean(!is.na(ch_merged_agri$rice_production_tons_lag1)), "\n")
+cat("Match rate, lag2 (rice production):",
+    mean(!is.na(ch_merged_agri$rice_production_tons_lag2)), "\n")
+
+cat("\nBirth years with an incomplete lag2 window (near data start):\n")
+ch_merged_agri %>%
+  filter(!is.na(birth_year), is.na(rice_production_tons_lag2)) %>%
+  count(birth_year) %>%
+  print(n = Inf)
+
+# saveRDS(ch_merged_agri, "D:/Monayer/ch_merged_agri.rds")
+
+
+# ============================================================
+# STEP 3: Station metadata + district coordinates + temp cleaning
+# ============================================================
+library(dplyr)
+library(readr)
+library(readxl)
+
+# ------------------------------------------------------------
+# 1. Station coordinates + station->district crosswalk
+#    (transcribed from your image; PLEASE spot-check lat/lon
+#     against the source table, especially altitude/est_year
+#     which are easy to mis-transcribe from an image)
+# ------------------------------------------------------------
+station_xwalk <- read_csv("station_district_crosswalk.csv", show_col_types = FALSE)
+
+# 11 stations flagged needs_verification == "YES" because the
+# station name isn't the district name itself (it's a town/upazila
+# within that district). Please confirm these against your own
+# knowledge / BMD documentation before we finalize:
+#   Chattogram_Ambagan, Chattogram_Patenga, Sandwip, Sitakunda -> Chittagong
+#   Cumilla -> Comilla                    Hatiya, Maijdee_Court -> Noakhali
+#   Kutubdia, Teknaf -> Coxsbazar         Jashore -> Jessore
+#   Mongla -> Bagerhat                    Khepupara -> Patuakhali
+#   Ishurdi -> Pabna                      Sayedpur -> Nilphamari
+#   Srimangal -> Maulvibazar
+station_xwalk %>% filter(needs_verification == "YES") %>% print(n = Inf)
+
+cat("\n", n_distinct(station_xwalk$matched_district),
+    "of 64 districts have at least one station directly in them.\n")
+
+# ------------------------------------------------------------
+# 2. District centroid coordinates (target points for kriging)
+# ------------------------------------------------------------
+district_coords <- read_csv("districts_lat_lon.csv", show_col_types = FALSE)
+
+districts_without_station <- district_coords %>%
+  filter(!district %in% station_xwalk$matched_district)
+cat("\n", nrow(districts_without_station),
+    "districts with NO direct station (fully interpolated):\n")
+print(districts_without_station$district)
+
+# ------------------------------------------------------------
+# 3. Load + clean station daily Max/Min temperature
+#    "****" (and common variants) treated as missing
+# ------------------------------------------------------------
+clean_temp_col <- function(x) {
+  x_chr <- as.character(x)
+  x_chr <- trimws(x_chr)
+  x_chr[x_chr %in% c("****", "***", "**", "*", "", "NA", "N/A")] <- NA
+  as.numeric(x_chr)
+}
+
+max_temp_raw <- read_excel("Max_Temp.xlsx")   # columns: St_ID, Year, Month, Date, MaxT
+min_temp_raw <- read_excel("Min_Temp.xlsx")   # columns: St_ID, Year, Month, Date, MinT  (confirm exact name)
+
+max_temp <- max_temp_raw %>%
+  mutate(
+    MaxT = clean_temp_col(MaxT),
+    date = as.Date(paste(Year, Month, Date, sep = "-"))
+  )
+
+min_temp <- min_temp_raw %>%
+  mutate(
+    MinT = clean_temp_col(MinT),
+    date = as.Date(paste(Year, Month, Date, sep = "-"))
+  )
+
+cat("\nMaxT missing (%):", round(100 * mean(is.na(max_temp$MaxT)), 2), "\n")
+cat("MinT missing (%):", round(100 * mean(is.na(min_temp$MinT)), 2), "\n")
+
+# any dates that failed to parse (e.g. Feb 30, bad Date value)?
+cat("\nUnparseable dates in max_temp:", sum(is.na(max_temp$date)), "\n")
+cat("Unparseable dates in min_temp:", sum(is.na(min_temp$date)), "\n")
+
+# missingness by station -- flags stations with big data gaps,
+# which matters for how much you can trust their contribution
+# to the variogram/kriging
+max_temp %>%
+  group_by(St_ID) %>%
+  summarise(pct_missing = round(100 * mean(is.na(MaxT)), 1), n = n()) %>%
+  left_join(station_xwalk %>% select(local_id, station_name),
+            by = c("St_ID" = "local_id")) %>%
+  arrange(desc(pct_missing)) %>%
+  print(n = Inf)
+
+# ------------------------------------------------------------
+# 4. Combine max + min into one station-day panel, attach coords
+# ------------------------------------------------------------
+station_day <- max_temp %>%
+  select(St_ID, date, Year, Month, Date, MaxT) %>%
+  full_join(min_temp %>% select(St_ID, date, MinT), by = c("St_ID", "date")) %>%
+  left_join(station_xwalk %>% select(local_id, station_name, matched_district, lat, lon),
+            by = c("St_ID" = "local_id"))
+
+# stations present in temp files but missing from the crosswalk
+# (name/ID mismatch -- check these!)
+unmatched_stations <- station_day %>% filter(is.na(lat)) %>% distinct(St_ID)
+if (nrow(unmatched_stations) > 0) {
+  cat("\nWARNING: St_ID values with no coordinate match:\n")
+  print(unmatched_stations)
+}
+
+# saveRDS(station_day, "station_day_panel.rds")
+
+#---------------------------------------------------------------------------------------------------
+# ============================================================
+# DIAGNOSTICS: fix before building the station-day panel
+# ============================================================
+library(dplyr)
+
+# ------------------------------------------------------------
+# 1. Find duplicate (St_ID, date) rows causing the many-to-many join
+# ------------------------------------------------------------
+dup_max <- max_temp %>%
+  count(St_ID, date) %>%
+  filter(n > 1)
+cat("Duplicate (St_ID, date) rows in max_temp:", nrow(dup_max), "\n")
+
+dup_min <- min_temp %>%
+  count(St_ID, date) %>%
+  filter(n > 1)
+cat("Duplicate (St_ID, date) rows in min_temp:", nrow(dup_min), "\n")
+
+# show a few actual duplicated records so you can see WHY they're
+# duplicated (exact repeat? conflicting values? different Year/Month/Date
+# text that happens to parse to the same date, e.g. typo in Year?)
+if (nrow(dup_max) > 0) {
+  max_temp %>%
+    semi_join(dup_max, by = c("St_ID", "date")) %>%
+    arrange(St_ID, date) %>%
+    print(n = 20)
+}
+if (nrow(dup_min) > 0) {
+  min_temp %>%
+    semi_join(dup_min, by = c("St_ID", "date")) %>%
+    arrange(St_ID, date) %>%
+    print(n = 20)
+}
+
+# Once you see the pattern, typical fixes are one of:
+#   (a) exact duplicate rows -> distinct(St_ID, date, .keep_all = TRUE)
+#   (b) same date, different values -> decide keep-first / average / flag
+# DO NOT blindly distinct() until you've looked at a few real examples --
+# if values genuinely differ, averaging silently could hide a data error.
+
+# ------------------------------------------------------------
+# 2. Rows with unparseable dates -- inspect the raw Year/Month/Date
+# ------------------------------------------------------------
+max_temp_raw %>%
+  mutate(date = as.Date(paste(Year, Month, Date, sep = "-"))) %>%
+  filter(is.na(date)) %>%
+  print()
+
+min_temp_raw %>%
+  mutate(date = as.Date(paste(Year, Month, Date, sep = "-"))) %>%
+  filter(is.na(date)) %>%
+  print()
+
+# ------------------------------------------------------------
+# 3. Stations present in temp files but absent from the crosswalk
+# ------------------------------------------------------------
+unmatched_ids <- union(
+  setdiff(unique(max_temp$St_ID), station_xwalk$local_id),
+  setdiff(unique(min_temp$St_ID), station_xwalk$local_id)
+)
+cat("\nSt_ID values with no crosswalk match:\n")
+print(sort(unmatched_ids))
+
+# how much data would we lose if we simply dropped these for now?
+n_dropped <- max_temp %>% filter(St_ID %in% unmatched_ids) %>% nrow()
+cat("\nRows in max_temp belonging to unmatched stations:", n_dropped,
+    "(", round(100 * n_dropped / nrow(max_temp), 2), "% of all rows )\n")
+
+max_temp %>%
+  filter(St_ID %in% unmatched_ids) %>%
+  count(St_ID) %>%
+  print(n = Inf)
+
+
+# ============================================================
+# Locate exact source rows for the duplicates (so you can jump
+# straight to them in Excel and see what's actually going on)
+# ============================================================
+library(readxl)
+library(dplyr)
+
+# how many sheets does the workbook actually have? (confirm we're
+# reading the sheet you think we're reading)
+cat("Sheets in Max_Temp.xlsx:\n")
+print(excel_sheets("Max_Temp.xlsx"))
+
+cat("\nSheets in Min_Temp.xlsx:\n")
+print(excel_sheets("Min_Temp.xlsx"))
+
+# re-read explicitly naming sheet = 1, and tag each row with its
+# ACTUAL Excel row number (header is row 1, so first data row is 2)
+max_temp_raw2 <- read_excel("Max_Temp.xlsx", sheet = 1) %>%
+  mutate(excel_row = row_number() + 1)
+
+min_temp_raw2 <- read_excel("Min_Temp.xlsx", sheet = 1) %>%
+  mutate(excel_row = row_number() + 1)
+
+# pull just the problem station-month so you can go find these
+# exact rows in the file (Ctrl+G / Name Box -> A<row> in Excel)
+cat("\n--- MaxT: exact Excel rows for St_ID 10208, Apr 2023 ---\n")
+max_temp_raw2 %>%
+  filter(St_ID == 10208, Year == 2023, Month == 4) %>%
+  select(excel_row, St_ID, Year, Month, Date, MaxT) %>%
+  arrange(Date) %>%
+  print(n = Inf)
+
+cat("\n--- MinT: exact Excel rows for St_ID 10208, Apr 2023 ---\n")
+min_temp_raw2 %>%
+  filter(St_ID == 10208, Year == 2023, Month == 4) %>%
+  select(excel_row, St_ID, Year, Month, Date, MinT) %>%
+  arrange(Date) %>%
+  print(n = Inf)
+
+# is 10208/April-2023 the ONLY affected station-month, or are there
+# others hiding elsewhere in the file?
+cat("\n--- All station-months affected by duplication (MaxT) ---\n")
+max_temp_raw2 %>%
+  count(St_ID, Year, Month, Date) %>%
+  filter(n > 1) %>%
+  distinct(St_ID, Year, Month) %>%
+  print(n = Inf)
+
+
+
+# ============================================================
+# Inspect context around the two duplicate blocks
+# ============================================================
+library(dplyr)
+
+# --- Block A: rows ~219557-219586 (first copy, St_ID 10208, Apr 2023) ---
+cat("--- Context around FIRST block (rows 219545-219595) ---\n")
+max_temp_raw2 %>%
+  filter(excel_row >= 219545, excel_row <= 219595) %>%
+  select(excel_row, St_ID, Year, Month, Date, MaxT) %>%
+  print(n = Inf)
+
+# --- Block B: rows ~219923-219952 (second copy) ---
+cat("\n--- Context around SECOND block (rows 219910-219960) ---\n")
+max_temp_raw2 %>%
+  filter(excel_row >= 219910, excel_row <= 219960) %>%
+  select(excel_row, St_ID, Year, Month, Date, MaxT) %>%
+  print(n = Inf)
+
+# --- Same for the 41851 / 2024-06 case ---
+dup_41851 <- max_temp_raw2 %>%
+  filter(St_ID == 41851, Year == 2024, Month == 6) %>%
+  arrange(excel_row)
+cat("\n--- 41851, Jun 2024 duplicate rows ---\n")
+print(dup_41851 %>% select(excel_row, St_ID, Year, Month, Date, MaxT), n = Inf)
+
+r1 <- min(dup_41851$excel_row)
+r2 <- max(dup_41851$excel_row[dup_41851$excel_row > r1 + 40])  # second block start, roughly
+cat("\n--- Context around 41851 first block ---\n")
+max_temp_raw2 %>%
+  filter(excel_row >= r1 - 10, excel_row <= r1 + 40) %>%
+  select(excel_row, St_ID, Year, Month, Date, MaxT) %>%
+  print(n = Inf)
+
+cat("\n--- Context around 41851 second block ---\n")
+max_temp_raw2 %>%
+  filter(excel_row >= r2 - 40, excel_row <= r2 + 10) %>%
+  select(excel_row, St_ID, Year, Month, Date, MaxT) %>%
+  print(n = Inf)
+
+# gap between the two Rangpur blocks -- is it exactly one station's
+# worth of annual rows (i.e. is 10208 the ONLY station between them,
+# or are other stations interleaved -- telling us if this is a
+# wholesale block reinsertion vs something narrower)
+cat("\n--- Distinct St_ID values strictly between the two 10208 blocks ---\n")
+max_temp_raw2 %>%
+  filter(excel_row > 219586, excel_row < 219923) %>%
+  distinct(St_ID) %>%
+  print(n = Inf)
+
+
+
+
+# ============================================================
+# Inspect context around the two duplicate blocks
+# ============================================================
+library(dplyr)
+
+# write everything to a text file too, in case console output gets
+# truncated/cut off when copying -- open inspect_output.txt afterward
+sink("inspect_output.txt", split = TRUE)  # split=TRUE still shows in console
+
+# --- Block A: rows ~219557-219586 (first copy, St_ID 10208, Apr 2023) ---
+cat("--- Context around FIRST block (rows 219545-219595) ---\n")
+max_temp_raw2 %>%
+  filter(excel_row >= 219545, excel_row <= 219595) %>%
+  select(excel_row, St_ID, Year, Month, Date, MaxT) %>%
+  print(n = Inf)
+
+# --- Block B: rows ~219923-219952 (second copy) ---
+cat("\n--- Context around SECOND block (rows 219910-219960) ---\n")
+max_temp_raw2 %>%
+  filter(excel_row >= 219910, excel_row <= 219960) %>%
+  select(excel_row, St_ID, Year, Month, Date, MaxT) %>%
+  print(n = Inf)
+
+# --- Same for the 41851 / 2024-06 case ---
+dup_41851 <- max_temp_raw2 %>%
+  filter(St_ID == 41851, Year == 2024, Month == 6) %>%
+  arrange(excel_row)
+cat("\n--- 41851, Jun 2024 duplicate rows ---\n")
+print(dup_41851 %>% select(excel_row, St_ID, Year, Month, Date, MaxT), n = Inf)
+
+r1 <- min(dup_41851$excel_row)
+r2 <- max(dup_41851$excel_row[dup_41851$excel_row > r1 + 40])  # second block start, roughly
+cat("\n--- Context around 41851 first block ---\n")
+max_temp_raw2 %>%
+  filter(excel_row >= r1 - 10, excel_row <= r1 + 40) %>%
+  select(excel_row, St_ID, Year, Month, Date, MaxT) %>%
+  print(n = Inf)
+
+cat("\n--- Context around 41851 second block ---\n")
+max_temp_raw2 %>%
+  filter(excel_row >= r2 - 40, excel_row <= r2 + 10) %>%
+  select(excel_row, St_ID, Year, Month, Date, MaxT) %>%
+  print(n = Inf)
+
+# gap between the two Rangpur blocks -- is it exactly one station's
+# worth of annual rows (i.e. is 10208 the ONLY station between them,
+# or are other stations interleaved -- telling us if this is a
+# wholesale block reinsertion vs something narrower)
+cat("\n--- Distinct St_ID values strictly between the two 10208 blocks ---\n")
+max_temp_raw2 %>%
+  filter(excel_row > 219586, excel_row < 219923) %>%
+  distinct(St_ID) %>%
+  print(n = Inf)
+
+sink()  # stop writing to file
+cat("\nFull output also saved to inspect_output.txt in your working directory.\n")
+
+
+# ============================================================
+# Full scan: find OTHER instances of the two error patterns
+# we just diagnosed, then apply targeted fixes
+# ============================================================
+library(dplyr)
+library(tidyr)
+
+# ------------------------------------------------------------
+# 0. Make sure raw2 objects actually have a `date` column
+#    (they only had excel_row before -- date was computed
+#    on max_temp/min_temp, not max_temp_raw2/min_temp_raw2)
+# ------------------------------------------------------------
+max_temp_raw2 <- max_temp_raw2 %>%
+  mutate(date = as.Date(paste(Year, Month, Date, sep = "-")))
+min_temp_raw2 <- min_temp_raw2 %>%
+  mutate(date = as.Date(paste(Year, Month, Date, sep = "-")))
+
+# ------------------------------------------------------------
+# PATTERN A: within a station's block (in file/row order), does
+# the date ever jump BACKWARD? This catches mislabeled-year rows
+# like the 10208 case -- even ones that don't happen to collide
+# with a real existing date (so wouldn't show up as a "duplicate").
+# ------------------------------------------------------------
+find_backward_jumps <- function(df, value_col) {
+  df %>%
+    arrange(St_ID, excel_row) %>%
+    group_by(St_ID) %>%
+    mutate(prev_date = lag(date)) %>%
+    filter(!is.na(prev_date), date < prev_date) %>%
+    ungroup() %>%
+    select(St_ID, excel_row, Year, Month, Date, prev_date, date, all_of(value_col))
+}
+
+cat("=== Backward date jumps in MaxT (candidate mislabeled-year rows) ===\n")
+backward_max <- find_backward_jumps(max_temp_raw2, "MaxT")
+print(backward_max, n = Inf)
+
+cat("\n=== Backward date jumps in MinT ===\n")
+backward_min <- find_backward_jumps(min_temp_raw2, "MinT")
+print(backward_min, n = Inf)
+
+# ------------------------------------------------------------
+# PATTERN B: within each station's own min-max date range, which
+# calendar dates are entirely ABSENT? A real gap (like 10120's
+# missing June 2024) shows up as a run of consecutive missing dates.
+# ------------------------------------------------------------
+find_date_gaps <- function(df) {
+  df %>%
+    group_by(St_ID) %>%
+    summarise(min_date = min(date, na.rm = TRUE),
+              max_date = max(date, na.rm = TRUE),
+              .groups = "drop") %>%
+    rowwise() %>%
+    mutate(all_dates = list(seq(min_date, max_date, by = "day"))) %>%
+    ungroup()
+}
+
+station_ranges <- find_date_gaps(max_temp_raw2)
+
+gaps <- station_ranges %>%
+  rowwise() %>%
+  mutate(
+    present_dates = list(max_temp_raw2$date[max_temp_raw2$St_ID == St_ID]),
+    missing_dates = list(setdiff(all_dates, present_dates))
+  ) %>%
+  ungroup() %>%
+  filter(lengths(missing_dates) > 0) %>%
+  select(St_ID, min_date, max_date, missing_dates)
+
+cat("\n=== Stations with entirely-absent calendar dates (real gaps) ===\n")
+for (i in seq_len(nrow(gaps))) {
+  md <- as.Date(gaps$missing_dates[[i]], origin = "1970-01-01")
+  cat("St_ID", gaps$St_ID[i], "-", length(md), "missing dates. Range:",
+      as.character(min(md)), "to", as.character(max(md)), "\n")
+}
+
+# ------------------------------------------------------------
+# TARGETED FIX 1: relabel the known 10208 mislabeled-year block
+# (confirmed via context: sits chronologically as Apr 2024, not
+# Apr 2023 -- verify these row numbers still match your file
+# before running, in case row numbers shifted)
+# ------------------------------------------------------------
+fix_rows_10208 <- 219923:219952
+
+max_temp_fixed <- max_temp_raw2 %>%
+  mutate(Year = if_else(excel_row %in% fix_rows_10208, 2024, Year))
+
+# CONFIRM min_temp has the identical issue at the identical rows
+# before applying the same fix -- check first!
+cat("\n=== Check: does min_temp show the same pattern at rows",
+    min(fix_rows_10208), "-", max(fix_rows_10208), "? ===\n")
+min_temp_raw2 %>%
+  filter(excel_row %in% fix_rows_10208) %>%
+  select(excel_row, St_ID, Year, Month, Date, MinT) %>%
+  print(n = Inf)
+
+# if confirmed identical, apply the same fix:
+min_temp_fixed <- min_temp_raw2 %>%
+  mutate(Year = if_else(excel_row %in% fix_rows_10208, 2024, Year))
+
+# rebuild the 'date' column after the Year fix
+max_temp_fixed <- max_temp_fixed %>%
+  mutate(date = as.Date(paste(Year, Month, Date, sep = "-")))
+min_temp_fixed <- min_temp_fixed %>%
+  mutate(date = as.Date(paste(Year, Month, Date, sep = "-")))
+
+# ------------------------------------------------------------
+# TARGETED FIX 2: drop the misplaced 41851 block sitting inside
+# 10120's sequence (rows 221810-221839). This leaves 10120's June
+# 2024 HONESTLY missing (NA), rather than silently mislabeling
+# these rows as 10120 or guessing 10120's true June values.
+# ------------------------------------------------------------
+drop_rows_41851_misplaced <- 221810:221839
+
+max_temp_fixed <- max_temp_fixed %>%
+  filter(!excel_row %in% drop_rows_41851_misplaced)
+min_temp_fixed <- min_temp_fixed %>%
+  filter(!excel_row %in% drop_rows_41851_misplaced)
+
+# ------------------------------------------------------------
+# Verify both known issues are resolved
+# ------------------------------------------------------------
+cat("\n=== Post-fix: duplicate (St_ID, date) count ===\n")
+max_temp_fixed %>% count(St_ID, date) %>% filter(n > 1) %>% print(n = Inf)
+
+cat("\n10120's June 2024 dates now (should be a genuine gap, not fabricated):\n")
+max_temp_fixed %>%
+  filter(St_ID == 10120, Year == 2024, Month %in% c(5, 6, 7)) %>%
+  arrange(date) %>%
+  select(excel_row, Year, Month, Date, MaxT) %>%
+  print(n = Inf)
+
+
+# ============================================================
+# Investigate: (1) new 41851/2021 backward jump, (2) unparseable
+# dates (esp. St_ID 11316), (3) the 3 newly found gaps
+# ============================================================
+library(dplyr)
+
+# ------------------------------------------------------------
+# 1. Context around the NEW 41851 backward jump (row 251240,
+#    labeled 2021-01-01, appearing right after 2024-06-30)
+# ------------------------------------------------------------
+cat("=== Context around row 251240 (41851, claims Year=2021) ===\n")
+max_temp_raw2 %>%
+  filter(excel_row >= 251200, excel_row <= 251290) %>%
+  select(excel_row, St_ID, Year, Month, Date, MaxT) %>%
+  print(n = Inf)
+
+# how far does this "2021" labeled run continue before returning
+# to sensible (2024+) dates? helps tell us if it's one mislabeled
+# day, a mislabeled block, or something bigger
+cat("\n=== All rows for St_ID 41851 with Year 2021 (in file order) ===\n")
+max_temp_raw2 %>%
+  filter(St_ID == 41851, Year == 2021) %>%
+  select(excel_row, St_ID, Year, Month, Date, MaxT) %>%
+  arrange(excel_row) %>%
+  print(n = 50)
+
+# ------------------------------------------------------------
+# 2. Unparseable dates -- show RAW Year/Month/Date values
+#    (this is what's producing date = NA, incl. the St_ID 11316 case)
+# ------------------------------------------------------------
+cat("\n=== Raw values behind unparseable dates, MaxT ===\n")
+max_temp_raw2 %>%
+  filter(is.na(date)) %>%
+  select(excel_row, St_ID, Year, Month, Date, MaxT) %>%
+  print(n = Inf)
+
+cat("\n=== Raw values behind unparseable dates, MinT ===\n")
+min_temp_raw2 %>%
+  filter(is.na(date)) %>%
+  select(excel_row, St_ID, Year, Month, Date, MinT) %>%
+  print(n = Inf)
+
+# ------------------------------------------------------------
+# 3. Investigate the 3 newly found gaps: are they genuine
+#    (e.g. station simply offline, or data collection hasn't
+#    reached that far yet) or another misplaced/foreign block
+#    hiding elsewhere in the file?
+# ------------------------------------------------------------
+investigate_gap <- function(st_id, gap_start, gap_end) {
+  cat("\n=== St_ID", st_id, ": rows immediately around the gap", 
+      as.character(gap_start), "to", as.character(gap_end), "===\n")
+  before <- max_temp_raw2 %>%
+    filter(St_ID == st_id, date < gap_start) %>%
+    arrange(desc(date)) %>%
+    slice_head(n = 5) %>%
+    arrange(date)
+  after <- max_temp_raw2 %>%
+    filter(St_ID == st_id, date > gap_end) %>%
+    arrange(date) %>%
+    slice_head(n = 5)
+  print(bind_rows(before, after) %>%
+          select(excel_row, St_ID, Year, Month, Date, MaxT))
+}
+
+investigate_gap(10120, as.Date("2024-06-01"), as.Date("2024-06-30"))  # already understood
+investigate_gap(11316, as.Date("2025-06-01"), as.Date("2025-10-31"))
+investigate_gap(11921, as.Date("2025-09-01"), as.Date("2025-10-31"))
+investigate_gap(41850, as.Date("2023-09-01"), as.Date("2023-09-30"))
+
+# is each station's data simply ENDING there (i.e. no more rows at
+# all after the gap -- station discontinued or data not yet compiled
+# past that point) vs continuing normally afterward (real internal gap)?
+cat("\n=== Max date on file, per flagged station ===\n")
+max_temp_raw2 %>%
+  filter(St_ID %in% c(11316, 11921, 41850)) %>%
+  group_by(St_ID) %>%
+  summarise(max_date_on_file = max(date, na.rm = TRUE), n_rows = n())
+
+
+
+##check
+# ============================================================
+# FINAL: consolidated station temperature cleaning pipeline
+# Produces: station_day (clean panel) + a data-cleaning log
+# ============================================================
+library(dplyr)
+library(readxl)
+library(readr)
+
+# ------------------------------------------------------------
+# 0. Load raw + station metadata
+# ------------------------------------------------------------
+station_xwalk <- read_csv("station_district_crosswalk.csv", show_col_types = FALSE)
+
+max_temp_raw2 <- read_excel("Max_Temp.xlsx", sheet = 1) %>%
+  mutate(excel_row = row_number() + 1)
+min_temp_raw2 <- read_excel("Min_Temp.xlsx", sheet = 1) %>%
+  mutate(excel_row = row_number() + 1)
+
+clean_temp_col <- function(x) {
+  x_chr <- trimws(as.character(x))
+  x_chr[x_chr %in% c("****", "***", "**", "*", "", "NA", "N/A")] <- NA
+  as.numeric(x_chr)
+}
+
+# ------------------------------------------------------------
+# CORRECTION 1: relabel 10208's mislabeled-year block
+#   Rows 219923-219952 said Year=2023 but sit chronologically
+#   between 2024-03-31 and 2024-05-01 -> real Apr 2024 data.
+# ------------------------------------------------------------
+fix_rows_10208 <- 219923:219952
+max_temp_raw2 <- max_temp_raw2 %>%
+  mutate(Year = if_else(excel_row %in% fix_rows_10208, 2024, Year))
+min_temp_raw2 <- min_temp_raw2 %>%
+  mutate(Year = if_else(excel_row %in% fix_rows_10208, 2024, Year))
+
+# ------------------------------------------------------------
+# CORRECTION 2: drop the misplaced 41851 block sitting inside
+#   10120's sequence (rows 221810-221839). A correctly-placed
+#   copy of this same data exists elsewhere (41851's own block).
+#   Leaves 10120's Jun 2024 genuinely missing.
+# ------------------------------------------------------------
+drop_rows_41851_misplaced <- 221810:221839
+max_temp_raw2 <- max_temp_raw2 %>% filter(!excel_row %in% drop_rows_41851_misplaced)
+min_temp_raw2 <- min_temp_raw2 %>% filter(!excel_row %in% drop_rows_41851_misplaced)
+
+# ------------------------------------------------------------
+# Clean values + parse dates (do this AFTER the corrections above)
+# ------------------------------------------------------------
+max_temp <- max_temp_raw2 %>%
+  mutate(MaxT = clean_temp_col(MaxT),
+         date = as.Date(paste(Year, Month, Date, sep = "-")))
+min_temp <- min_temp_raw2 %>%
+  mutate(MinT = clean_temp_col(MinT),
+         date = as.Date(paste(Year, Month, Date, sep = "-")))
+
+# ------------------------------------------------------------
+# CORRECTION 3: drop template-artifact rows (Date=31 in a
+#   <31-day month -> unparseable, and already valued **** anyway)
+# ------------------------------------------------------------
+n_before_max <- nrow(max_temp)
+max_temp <- max_temp %>% filter(!is.na(date))
+n_before_min <- nrow(min_temp)
+min_temp <- min_temp %>% filter(!is.na(date))
+
+# ------------------------------------------------------------
+# Final duplicate check -- should be zero now
+# ------------------------------------------------------------
+final_dup_check <- max_temp %>% count(St_ID, date) %>% filter(n > 1)
+if (nrow(final_dup_check) > 0) {
+  warning("Duplicates still remain -- inspect before proceeding!")
+  print(final_dup_check)
+} else {
+  cat("No remaining duplicate (St_ID, date) rows in MaxT. Good.\n")
+}
+
+# ------------------------------------------------------------
+# Build final station-day panel with coordinates attached
+# ------------------------------------------------------------
+station_day <- max_temp %>%
+  select(St_ID, date, Year, Month, Date, MaxT) %>%
+  full_join(min_temp %>% select(St_ID, date, MinT), by = c("St_ID", "date")) %>%
+  left_join(station_xwalk %>% select(local_id, station_name, matched_district, lat, lon),
+            by = c("St_ID" = "local_id"))
+
+cat("\nFinal station_day panel:", nrow(station_day), "rows,",
+    n_distinct(station_day$St_ID), "stations,",
+    round(100 * mean(is.na(station_day$MaxT)), 2), "% MaxT missing,",
+    round(100 * mean(is.na(station_day$MinT)), 2), "% MinT missing\n")
+
+# stations still not matched to a district (the 9 IDs found earlier,
+# e.g. 41850, 41851, 41881, etc. -- still need coordinates for these
+# before they can contribute to kriging)
+cat("\nStations with no coordinate match (need metadata before kriging):\n")
+station_day %>% filter(is.na(lat)) %>% distinct(St_ID) %>% print(n = Inf)
+
+# ------------------------------------------------------------
+# DATA CLEANING LOG -- for your methods appendix
+# ------------------------------------------------------------
+cleaning_log <- tibble::tribble(
+  ~issue, ~station, ~period, ~action, ~rows_affected,
+  "Mislabeled year (2023 -> 2024)", "10208 (Rangpur)", "Apr 2024", "Relabeled Year field", 30,
+  "Misplaced duplicate block from another station", "41851 data found inside 10120's sequence", "Jun 2024", "Dropped misplaced rows; correct copy retained elsewhere", 30,
+  "Template artifact (Date=31 in <31-day month)", "11921, 11316", "Sep/Nov (various years)", "Dropped unparseable rows", 3,
+  "Genuine station downtime (rows present, value missing)", "11316, 11921", "Jun-Oct 2025 / Sep-Oct 2025", "Left as missing (no action)", NA,
+  "Genuine data gap (no rows at all)", "41850", "Sep 2023", "Left as missing (no action); not found misplaced elsewhere", 30,
+  "Out-of-order but uniquely-labeled block", "41851", "2021 (full year)", "No action needed -- merges correctly by St_ID regardless of row position", NA
+)
+print(cleaning_log, n = Inf, width = Inf)
+write_csv(cleaning_log, "station_data_cleaning_log.csv")
+
+# saveRDS(station_day, "station_day_panel.rds")
+
+
+
+
+# ============================================================
+# FINAL: consolidated station temperature cleaning pipeline
+# Produces: station_day (clean panel) + a data-cleaning log
+# ============================================================
+library(dplyr)
+library(readxl)
+library(readr)
+
+# ------------------------------------------------------------
+# 0. Load raw + station metadata
+# ------------------------------------------------------------
+station_xwalk <- read_csv("station_district_crosswalk.csv", show_col_types = FALSE)
+# NOTE: 43 of 44 stations now have coordinates. St_ID 91850 remains
+# unresolved (not found in any source, only 30 rows, odd ID pattern)
+# and should be excluded from kriging. 6 stations (Tetulia, Dimla,
+# Rajarhat, Badalgachhi, Tarash, Kumarkhali) use upazila-town
+# coordinates sourced from Wikipedia/Banglapedia, not exact station
+# siting -- note this as a minor limitation in your methods.
+
+max_temp_raw2 <- read_excel("Max_Temp.xlsx", sheet = 1) %>%
+  mutate(excel_row = row_number() + 1)
+min_temp_raw2 <- read_excel("Min_Temp.xlsx", sheet = 1) %>%
+  mutate(excel_row = row_number() + 1)
+
+clean_temp_col <- function(x) {
+  x_chr <- trimws(as.character(x))
+  x_chr[x_chr %in% c("****", "***", "**", "*", "", "NA", "N/A")] <- NA
+  as.numeric(x_chr)
+}
+
+# ------------------------------------------------------------
+# CORRECTION 1: relabel 10208's mislabeled-year block
+#   Rows 219923-219952 said Year=2023 but sit chronologically
+#   between 2024-03-31 and 2024-05-01 -> real Apr 2024 data.
+# ------------------------------------------------------------
+fix_rows_10208 <- 219923:219952
+max_temp_raw2 <- max_temp_raw2 %>%
+  mutate(Year = if_else(excel_row %in% fix_rows_10208, 2024, Year))
+min_temp_raw2 <- min_temp_raw2 %>%
+  mutate(Year = if_else(excel_row %in% fix_rows_10208, 2024, Year))
+
+# ------------------------------------------------------------
+# CORRECTION 2: drop the misplaced 41851 block sitting inside
+#   10120's sequence (rows 221810-221839). A correctly-placed
+#   copy of this same data exists elsewhere (41851's own block).
+#   Leaves 10120's Jun 2024 genuinely missing.
+# ------------------------------------------------------------
+drop_rows_41851_misplaced <- 221810:221839
+max_temp_raw2 <- max_temp_raw2 %>% filter(!excel_row %in% drop_rows_41851_misplaced)
+min_temp_raw2 <- min_temp_raw2 %>% filter(!excel_row %in% drop_rows_41851_misplaced)
+
+# ------------------------------------------------------------
+# Clean values + parse dates (do this AFTER the corrections above)
+# ------------------------------------------------------------
+max_temp <- max_temp_raw2 %>%
+  mutate(MaxT = clean_temp_col(MaxT),
+         date = as.Date(paste(Year, Month, Date, sep = "-")))
+min_temp <- min_temp_raw2 %>%
+  mutate(MinT = clean_temp_col(MinT),
+         date = as.Date(paste(Year, Month, Date, sep = "-")))
+
+# ------------------------------------------------------------
+# CORRECTION 3: drop template-artifact rows (Date=31 in a
+#   <31-day month -> unparseable, and already valued **** anyway)
+# ------------------------------------------------------------
+n_before_max <- nrow(max_temp)
+max_temp <- max_temp %>% filter(!is.na(date))
+n_before_min <- nrow(min_temp)
+min_temp <- min_temp %>% filter(!is.na(date))
+
+# ------------------------------------------------------------
+# Final duplicate check -- should be zero now
+# ------------------------------------------------------------
+final_dup_check <- max_temp %>% count(St_ID, date) %>% filter(n > 1)
+if (nrow(final_dup_check) > 0) {
+  warning("Duplicates still remain -- inspect before proceeding!")
+  print(final_dup_check)
+} else {
+  cat("No remaining duplicate (St_ID, date) rows in MaxT. Good.\n")
+}
+
+# ------------------------------------------------------------
+# Build final station-day panel with coordinates attached
+# ------------------------------------------------------------
+station_day <- max_temp %>%
+  select(St_ID, date, Year, Month, Date, MaxT) %>%
+  full_join(min_temp %>% select(St_ID, date, MinT), by = c("St_ID", "date")) %>%
+  left_join(station_xwalk %>% select(local_id, station_name, matched_district, lat, lon),
+            by = c("St_ID" = "local_id"))
+
+cat("\nFinal station_day panel:", nrow(station_day), "rows,",
+    n_distinct(station_day$St_ID), "stations,",
+    round(100 * mean(is.na(station_day$MaxT)), 2), "% MaxT missing,",
+    round(100 * mean(is.na(station_day$MinT)), 2), "% MinT missing\n")
+
+# stations still not matched to a district (the 9 IDs found earlier,
+# e.g. 41850, 41851, 41881, etc. -- still need coordinates for these
+# before they can contribute to kriging)
+cat("\nStations with no coordinate match (need metadata before kriging):\n")
+station_day %>% filter(is.na(lat)) %>% distinct(St_ID) %>% print(n = Inf)
+
+# ------------------------------------------------------------
+# DATA CLEANING LOG -- for your methods appendix
+# ------------------------------------------------------------
+cleaning_log <- tibble::tribble(
+  ~issue, ~station, ~period, ~action, ~rows_affected,
+  "Mislabeled year (2023 -> 2024)", "10208 (Rangpur)", "Apr 2024", "Relabeled Year field", 30,
+  "Misplaced duplicate block from another station", "41851 data found inside 10120's sequence", "Jun 2024", "Dropped misplaced rows; correct copy retained elsewhere", 30,
+  "Template artifact (Date=31 in <31-day month)", "11921, 11316", "Sep/Nov (various years)", "Dropped unparseable rows", 3,
+  "Genuine station downtime (rows present, value missing)", "11316, 11921", "Jun-Oct 2025 / Sep-Oct 2025", "Left as missing (no action)", NA,
+  "Genuine data gap (no rows at all)", "41850", "Sep 2023", "Left as missing (no action); not found misplaced elsewhere", 30,
+  "Out-of-order but uniquely-labeled block", "41851", "2021 (full year)", "No action needed -- merges correctly by St_ID regardless of row position", NA
+)
+print(cleaning_log, n = Inf, width = Inf)
+write_csv(cleaning_log, "station_data_cleaning_log.csv")
+
+# saveRDS(station_day, "station_day_panel.rds")
+
+
+
+
+# ============================================================
+# STEP 4: quantify excluded-station impact, then krige daily
+# station data onto the 64 district centroids
+# ============================================================
+library(dplyr)
+library(sf)
+library(gstat)
+library(readr)
+library(purrr)
+library(tidyr)
+
+# ------------------------------------------------------------
+# 0. Quantify what we lose by excluding the 9 unmatched stations
+# ------------------------------------------------------------
+cat("=== Impact of excluding unmatched stations ===\n")
+station_day %>%
+  mutate(matched = !is.na(lat)) %>%
+  group_by(matched) %>%
+  summarise(n_rows = n(), n_stations = n_distinct(St_ID),
+            pct_of_total = round(100 * n() / nrow(station_day), 1))
+
+# keep only stations we can actually place on the map
+station_day_geo <- station_day %>% filter(!is.na(lat), !is.na(lon))
+
+cat("\nUsable for kriging:", n_distinct(station_day_geo$St_ID), "stations,",
+    nrow(station_day_geo), "station-day rows\n")
+
+# ------------------------------------------------------------
+# 1. District centroids as an sf object (kriging targets)
+# ------------------------------------------------------------
+district_coords <- read_csv("districts_lat_lon.csv", show_col_types = FALSE)
+district_sf <- st_as_sf(district_coords, coords = c("lon", "lat"), crs = 4326)
+
+# ------------------------------------------------------------
+# 2. Fit ONE pooled variogram per calendar month per variable.
+#    Rationale: with ~35 stations, a fresh variogram per DAY is
+#    unstable (discussed earlier). Pooling many days within the
+#    same month gives enough pairs for a stable fit while still
+#    letting the spatial structure vary seasonally (e.g. monsoon
+#    rainfall/temperature gradients differ from winter ones).
+# ------------------------------------------------------------
+fit_monthly_variogram <- function(data, value_col, month_num) {
+  month_data <- data %>%
+    filter(Month == month_num, !is.na(.data[[value_col]])) %>%
+    st_as_sf(coords = c("lon", "lat"), crs = 4326, remove = FALSE)
+  
+  if (nrow(month_data) < 30) return(NULL)  # not enough pairs, skip
+  
+  v_emp <- variogram(as.formula(paste(value_col, "~ 1")), month_data)
+  tryCatch(
+    fit.variogram(v_emp, vgm(psill = NA, model = "Sph", range = NA, nugget = NA)),
+    error = function(e) NULL
+  )
+}
+
+cat("\nFitting monthly variograms (MaxT)...\n")
+maxt_variograms <- map(1:12, ~ fit_monthly_variogram(station_day_geo, "MaxT", .x))
+names(maxt_variograms) <- month.abb
+print(maxt_variograms)
+
+cat("\nFitting monthly variograms (MinT)...\n")
+mint_variograms <- map(1:12, ~ fit_monthly_variogram(station_day_geo, "MinT", .x))
+names(mint_variograms) <- month.abb
+print(mint_variograms)
+
+# ------------------------------------------------------------
+# 3. Krige ONE day, given that day's station readings + the
+#    matching month's fixed variogram model
+# ------------------------------------------------------------
+krige_one_day <- function(day_data, value_col, vgm_model, target_sf) {
+  day_sf <- day_data %>%
+    filter(!is.na(.data[[value_col]])) %>%
+    st_as_sf(coords = c("lon", "lat"), crs = 4326, remove = FALSE)
+  
+  if (nrow(day_sf) < 5 || is.null(vgm_model)) return(NULL)  # too few stations that day
+  
+  result <- tryCatch(
+    krige(as.formula(paste(value_col, "~ 1")), day_sf, target_sf, model = vgm_model),
+    error = function(e) NULL
+  )
+  if (is.null(result)) return(NULL)
+  
+  tibble(
+    district = target_sf$district,
+    pred = result$var1.pred,
+    var = result$var1.var
+  )
+}
+
+# ------------------------------------------------------------
+# 4. Loop over all days -- this is the expensive part.
+#    ~16,000 days x 2 variables. Runs a progress message every
+#    500 days so you can see it's alive (this will take a while).
+# ------------------------------------------------------------
+all_dates <- sort(unique(station_day_geo$date))
+cat("\nKriging", length(all_dates), "days... this will take a while.\n")
+
+district_day_list <- vector("list", length(all_dates))
+
+for (i in seq_along(all_dates)) {
+  d <- all_dates[i]
+  m <- as.integer(format(d, "%m"))
+  day_data <- station_day_geo %>% filter(date == d)
+  
+  maxt_result <- krige_one_day(day_data, "MaxT", maxt_variograms[[m]], district_sf)
+  mint_result <- krige_one_day(day_data, "MinT", mint_variograms[[m]], district_sf)
+  
+  if (!is.null(maxt_result)) maxt_result <- maxt_result %>% rename(maxt_pred = pred, maxt_var = var)
+  if (!is.null(mint_result)) mint_result <- mint_result %>% rename(mint_pred = pred, mint_var = var)
+  
+  if (!is.null(maxt_result) && !is.null(mint_result)) {
+    district_day_list[[i]] <- full_join(maxt_result, mint_result, by = "district") %>%
+      mutate(date = d)
+  }
+  
+  if (i %% 500 == 0) cat("  ...", i, "/", length(all_dates), "days done\n")
+}
+
+district_day <- bind_rows(district_day_list)
+
+cat("\nDone. district_day panel:", nrow(district_day), "rows,",
+    n_distinct(district_day$district), "districts,",
+    length(all_dates), "candidate days\n")
+
+# saveRDS(district_day, "district_day_kriged.rds")

@@ -1,0 +1,7 @@
+issue,station,period,action,rows_affected
+Mislabeled year (2023 -> 2024),10208 (Rangpur),Apr 2024,Relabeled Year field,30
+Misplaced duplicate block from another station,41851 data found inside 10120's sequence,Jun 2024,Dropped misplaced rows; correct copy retained elsewhere,30
+Template artifact (Date=31 in <31-day month),"11921, 11316",Sep/Nov (various years),Dropped unparseable rows,3
+"Genuine station downtime (rows present, value missing)","11316, 11921",Jun-Oct 2025 / Sep-Oct 2025,Left as missing (no action),NA
+Genuine data gap (no rows at all),41850,Sep 2023,Left as missing (no action); not found misplaced elsewhere,30
+Out-of-order but uniquely-labeled block,41851,2021 (full year),No action needed -- merges correctly by St_ID regardless of row position,NA

@@ -1,0 +1,44 @@
+local_id,wmo_id,station_name,division,lat,lon,altitude_m,est_year,matched_district,needs_verification
+11111,41923,Dhaka,Dhaka,23.78,90.38,8.5,1949,Dhaka,
+41909,41909,Tangail,Dhaka,24.25,89.93,10.2,1983,Tangail,
+10609,41886,Mymensingh,Dhaka,24.73,90.42,18.0,1883,Mymensingh,
+11505,41929,Faridpur,Dhaka,23.60,89.85,8.1,1883,Faridpur,
+11513,41939,Madaripur,Dhaka,23.17,90.18,7.0,1976,Madaripur,
+41977,41977,Chattogram_Ambagan,Chattogram,22.35,91.82,33.2,1937,Chittagong,YES
+11921,41978,Chattogram_Patenga,Chattogram,22.22,91.80,5.5,1937,Chittagong,YES
+11927,41992,Cox's_Bazar,Chattogram,21.45,91.97,2.1,1908,Coxsbazar,
+11316,41941,Chandpur,Chattogram,23.23,90.70,4.9,1964,Chandpur,
+11313,41933,Cumilla,Chattogram,23.43,91.18,7.5,1883,Comilla,YES
+11805,41943,Feni,Chattogram,23.03,91.42,6.4,1973,Feni,
+11814,41963,Hatiya,Chattogram,22.45,91.10,2.4,1965,Noakhali,YES
+11925,41989,Kutubdia,Chattogram,21.82,91.85,2.7,1977,Coxsbazar,YES
+11809,41953,Maijdee_Court,Chattogram,22.87,91.10,4.9,1883,Noakhali,YES
+12007,41966,Rangamati,Chattogram,22.63,92.15,68.9,1957,Rangamati,
+11916,41964,Sandwip,Chattogram,22.48,91.43,2.1,1966,Chittagong,YES
+11912,41965,Sitakunda,Chattogram,22.63,91.70,7.3,1977,Chittagong,YES
+11929,41998,Teknaf,Chattogram,20.87,92.30,5.0,1976,Coxsbazar,YES
+11604,41947,Khulna,Khulna,22.78,89.53,2.1,1921,Khulna,
+11407,41936,Jashore,Khulna,23.20,89.33,6.1,1867,Jessore,YES
+11610,41946,Satkhira,Khulna,22.72,89.08,4.0,1877,Satkhira,
+41926,41926,Chuadanga,Khulna,23.65,88.82,11.6,1986,Chuadanga,
+41958,41958,Mongla,Khulna,22.47,89.60,1.8,1988,Bagerhat,YES
+11704,41950,Barisal,Barisal,22.72,90.37,2.1,1883,Barisal,
+12103,41960,Patuakhali,Barisal,22.33,90.33,1.5,1973,Patuakhali,
+11706,41951,Bhola,Barisal,22.68,90.65,4.3,1965,Bhola,
+12110,41984,Khepupara,Barisal,21.98,90.23,1.8,1973,Patuakhali,YES
+10320,41895,Rajshahi,Rajshahi,24.37,88.70,19.5,1883,Rajshahi,
+10408,41883,Bogra,Rajshahi,24.85,89.37,17.9,1884,Bogra,
+10910,41907,Ishurdi,Rajshahi,24.15,89.03,12.9,1963,Pabna,YES
+10208,41859,Rangpur,Rangpur,25.73,89.27,32.6,1883,Rangpur,
+10120,41863,Dinajpur,Rangpur,25.65,88.68,37.6,1980,Dinajpur,
+41858,41858,Sayedpur,Rangpur,25.75,88.92,39.6,1980,Nilphamari,YES
+10705,41891,Sylhet,Sylhet,24.90,91.88,33.5,1952,Sylhet,
+10724,41915,Srimangal,Sylhet,24.30,91.73,22.0,1905,Maulvibazar,YES
+41850,41850,Tetulia,Rangpur,26.483,88.35,,,Panchagarh,"YES (web-sourced, upazila town coords not exact station siting)"
+41851,41851,Dimla,Rangpur,26.128,88.925,,,Nilphamari,"YES (web-sourced, upazila town coords not exact station siting)"
+41856,41856,Rajarhat,Rangpur,25.8,89.55,,,Kurigram,"YES (web-sourced, upazila town coords not exact station siting)"
+41881,41881,Badalgachhi,Rajshahi,24.967,88.9,,,Naogaon,"YES (web-sourced, upazila town coords not exact station siting)"
+41897,41897,Tarash,Rajshahi,24.433,89.375,,,Sirajgonj,"YES (web-sourced, upazila town coords not exact station siting)"
+41927,41927,Kumarkhali,Khulna,23.854,89.242,,,Kustia,"YES (web-sourced, upazila town coords not exact station siting)"
+41888,41888,Netrokona,Mymensingh,24.88719,90.73292,,,Netrokona,"YES (web-sourced, upazila town coords not exact station siting)"
+41938,41938,Gopalganj,Dhaka,23.0155,89.835,,,Gopalganj,"YES (web-sourced, upazila town coords not exact station siting)"
